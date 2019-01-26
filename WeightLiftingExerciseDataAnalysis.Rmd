@@ -1,0 +1,675 @@
+---
+title: "Weight Lifting Exercise Data Analysis"
+author: "Ziqi-jiang"
+date: "1/17/2019"
+output: html_document
+---
+## Goal
+The goal of this project is to predict the manner in which people did the exercise. This is the "classe" variable in the training set. 
+
+## Report
+
+### How I built models
+
+I built two training data sets: training1 and training2 after dealing with missing values. For each training data set, what I did as follows:
+
+(1) Preprocess: Checking Zero- and Near Zero-Variance Predictors, Creating dummy variables
+
+(2) Exploratory Analysis: Checking linear dependencies, Calculating correlation using Simple Linear Regression and Chi-Squared, Setting PCA and Cross-Validation (Bootstrap and 10-fold Cross Validation)
+
+(3) Model fitting & stacking: Splitting dataset into Training sub-dataset and Validation sub-dataset, fitting RandomForest, Linear Discriminant Analysis Model, Penalized Multinomial Regression model, stacking them together.
+
+(4) Model selection: Compare the Accuracies and their p-values
+
+### How I used cross validation
+
+I used cross validation during variable selection. I repeated bootstrap for 25 times to do the cross-validation for small training dataset, which is training2. And I repeated 10-fold cross-validation for 3 times to the cross-validation for dataset with plenty of data, which is training1.
+
+### The expectation on out of sample error
+
+I expect the out of sample error to be small, although larger than in sample error(from the result of validation).
+
+I split the dataset into training dataset and validation dataset. Before testing, I used the validation dataset to test the models, which could give me a general idea about how the models might perform. During being validated, the final model I chose, the Random Forest Model generated from training1 dataset, resulted in a high accuracy. 
+
+I looked into the test dataset, this data is not greatly different from the training data. So, I suppose the model which perform well when dealing with training data can handle this test data, too.
+
+
+## Preprocessing
+### Missing Values
+```{r LoadingData, include=FALSE}
+training = read.csv("/Users/jiangziqi/Documents/2019.1/Preparation/Practical machine learning/pml-training.csv",na.strings = c("NA","NaN","","#DIV/0!"),header = TRUE)
+
+testing = read.csv("/Users/jiangziqi/Documents/2019.1/Preparation/Practical machine learning/pml-testing.csv",na.strings = c("NA","NaN","","#DIV/0!"),header = TRUE)
+
+all(colnames(training)%in%colnames(testing))
+summary(training)
+```
+
+In the result of the summary, it is found that some columns only contains NAs. I'm removing these empty columns.
+
+```{r MissingData, include=FALSE}
+any(is.na(training$classe))
+
+for(i in length(colnames(training)):1){
+        if(all((is.na(training[,i])))){
+                training[,i] = NULL
+        }
+}
+
+NA_Rate = c()
+for(i in 1:length(colnames(training))){
+        NA_Rate[i] = sum(is.na(training[,i]))/nrow(training)
+}
+```
+#### Conclusion
+As we can see, for these missing values:
+1. For these variables, they either contains no missing value or contains less than 3% non-na values.
+2. There is no missing value in the response variable.
+
+#### How to deal
+Currently, I decide to take two different approaches to deal with these missing values:
+1.Remove all the columns with NAs.
+2.Remove all the rows with NAs.
+
+#### Why I am dealing in this way
+There are two reasons:
+1. The records with missing values takes a huge propotion of this training dataset and the proportions are close to each other.
+2. For these records, they don't have missing value in the response variable.
+3. For these variables, in the comparison with other variables, they contains too little information, which may induce bias or mistake while constructing predictions.
+
+```{r MissingData2, include=FALSE}
+training1 = data.frame(training)
+
+for(i in length(colnames(training1)):1){
+        if(any((is.na(training1[,i])))){
+                training1[,i] = NULL
+        }
+}
+
+any(is.na(training1))
+colnames(training1)
+summary(training1)
+training1$X = NULL
+
+training2 = data.frame(training)
+training2 = na.omit(training2)
+
+any(is.na(training2))
+colnames(training2)
+summary(training2)
+training2$X = NULL
+```
+
+### Zero- and Near Zero-Variance Predictors
+In the summary for the second training set, I found there are several columns contains just one value, which is useless for fitting models. 
+
+#### How to deal
+I removed this kind of columns in the second training.
+
+#### Why I am dealing in this way
+In some situations, the data generating mechanism can create predictors that only have a single unique value (i.e. a “zero-variance predictor”). For many models (excluding tree-based models), this may cause the model to crash or the fit to be unstable.
+
+Similarly, predictors might have only a handful of unique values that occur with very low frequencies.
+
+The concern here that these predictors may become zero-variance predictors when the data are split into cross-validation/bootstrap sub-samples or that a few samples may have an undue influence on the model. These “near-zero-variance” predictors may need to be identified and eliminated prior to modeling.
+
+```{r NearZeroVariance}
+library(caret)
+nzv1 = nearZeroVar(training1, saveMetrics = TRUE)
+nzv2 = nearZeroVar(training2, saveMetrics = TRUE)
+
+for(i in length(colnames(training2)):1){
+        if(all(training2[,i]==training2[1,i])){
+                training2[,i] = NULL
+        }
+}
+```
+
+### Creating Dummy Variables (Training2)
+
+```{r DummyVariables}
+
+dummies2 = dummyVars(classe ~ ., data = training2)
+training2_dummy = data.frame(predict(dummies2, newdata = training2))
+
+nzv2_dummy = nearZeroVar(training2_dummy, saveMetrics = TRUE)
+
+training2_dummy = training2_dummy[,!nzv2_dummy$nzv]
+
+summary(training2_dummy)
+```
+
+## Exploratory Analysis
+
+To analyze the data more easily, I split the training1 data set into categorical variables and numerical variables.
+```{r Training1SplitNumCat, include=FALSE}
+
+table(training1$classe)
+par(mfrow=c(1,2))
+barplot(table(training1$classe), main = "Barplot for response")
+pie(table(training1$classe), main = "Piechart for response",radius = 1)
+
+training1_num = data.frame(training1)
+for(i in length(colnames(training1_num)):1){
+     if (class(training1_num[,i]) %in% c("integer","numeric")){
+         next()  
+     }
+     else {
+         if(i==length(colnames(training1_num))){
+             next()
+         }
+         else {training1_num[,i] = NULL
+         }
+     }
+}
+
+training1_cat = data.frame(training1)
+for(i in length(colnames(training1_cat)):1){
+     if (class(training1_cat[,i]) %in% c("integer","numeric")){
+           training1_cat[,i] = NULL
+     }
+     else {
+         next()
+     }
+}
+```
+
+### Examing correlation
+
+#### Linear Dependency check (Training2)
+```{r}
+
+descrCor2 = cor(training2_dummy)
+summary(descrCor2[upper.tri(descrCor2)])
+highlyCorDescr2 = findCorrelation(descrCor2, cutoff = .75)
+training2_dummy = training2_dummy[,-highlyCorDescr2]
+descrCor2_Aft = cor(training2_dummy)
+summary(descrCor2_Aft[upper.tri(descrCor2_Aft)])
+
+comboInfo2 = findLinearCombos(training2_dummy)
+comboInfo2$remove
+```
+
+#### Numeric Variables (Training1)
+
+```{r CorrelationForTraining1}
+# Numeric Variables in training1
+# Correlation with the response
+for(i in (length(colnames(training1_num))-1):1){
+        p = (summary(lm(training1_num[,i]~training1_num$classe))$coefficients[,4]<0.05)
+        if(all(p)){
+                next()
+        } else {
+                training1_num[,i] = NULL
+        }
+}
+
+# Correlation with other predictor variables
+n = ncol(training1_num)
+m = n-1
+training1_num_pred = data.frame(training1_num[,1:m])
+cormat = signif(cor(training1_num_pred),2)
+col = colorRampPalette(c("blue", "white", "red"))(20)
+heatmap(cormat, col=col,symm = TRUE)
+
+cordf = data.frame(cormat)
+cor_dorp_v = c()
+for (i in colnames(cordf)){
+        for (j in row.names(cordf)){
+                if (i!=j){
+                      if (abs(cordf[j,i]) > 0.95){
+                        pi = summary(lm(training1_num[,i]~training1_num$classe))$coefficients[,4]
+                        pj = summary(lm(training1_num[,j]~training1_num$classe))$coefficients[,4]
+                        if (mean(pi)>mean(pj) & !(i %in% cor_dorp_v)){
+                                cor_dorp_v = append(cor_dorp_v,i)
+                        } else {
+                                if (!(j %in% cor_dorp_v))
+                                cor_dorp_v = append(cor_dorp_v,j)
+                        }
+                              }  
+                }
+                
+        }
+}
+
+for (i in cor_dorp_v){
+        training1_num[,i] = NULL
+}
+
+#par(mfrow=c(2,2))
+#for (i in 1:(length(colnames(training1_num))-1)){
+#        boxplot(training1_num[,i]~training1_num$classe,main = colnames(training1_num)[i])
+#        if (i%%4 == 0){
+#           par(mfrow=c(2,2))     
+#        }
+#}
+
+#Because of the limitation on the number of plots, I just show 3 here
+par(mfrow=c(2,2))
+for (i in 1:3){
+        boxplot(training1_num[,i]~training1_num$classe,main = colnames(training1_num)[i])
+}
+```
+
+#### How to deal
+
+Between predictors and response, I constucted simple linear regression between one numeric predictor variable and the response variable and checked the p-value of the regressor. If the p-value is smaller than 0.05, I consider the relationship is statistically significant.
+
+Between predictors, I calculate the correlation between two predictor variables. When the correlation statistic is larger than 0.95, which means they are almost the same, in these two predictors, I remove the predictor with less significant relationship with response.
+
+After removing variables which have strong correlation with another predictor, I use boxplot to visualize and check the relationship betweeen predictor and response.
+
+#### Why I am dealing in this way
+
+Between predictors and response, because the response variable is categorical while most other variables are numeric. And during this stage, I hope the model I am using to be as simple as possible, so that it enables the outcome to be as interpretable as possible. As a result, I choose simple linear regression model.
+
+Between predictors, because I use simple linear regression to exam the relationship between predictors and response, which left the correlation between predictor out. I need to find the significant correlation.
+
+#### Categorical Variables (Training1)
+
+```{r NominalVariables1Correlation, include=FALSE}
+# Nominal Variables in training1
+# Correlation with the response
+library("graphics")
+for (i in 1:(length(colnames(training1_cat))-1)){
+        a = table(training1_cat[,i],training1_cat$classe)
+        mosaicplot(a, shade = TRUE, las=2,
+           main = colnames(training1_cat)[i])
+}
+
+#Because of the limitation on the number of plots, I just show 2 here
+
+for (i in 1:2){
+        a = table(training1_cat[,i],training1_cat$classe)
+        mosaicplot(a, shade = TRUE, las=2,
+           main = colnames(training1_cat)[i])
+}
+
+# Correlation with other predictor variables
+
+chisq_cat = data.frame()
+chisq_cat_p = data.frame()
+for (i in colnames(training1_cat)){
+        for (j in colnames(training1_cat)){
+                if (i==j){
+                        next()
+                } else {
+                        chisq_cat[j,i] = chisq.test(training1_cat[,i],training1_cat[,j])$statistic
+                        chisq_cat_p[j,i] = chisq.test(training1_cat[,i],training1_cat[,j])$p.value
+                }
+                
+        }
+}
+chisq_cat
+chisq_cat_p
+```
+
+#### How to deal
+
+Between predictors and response, I used a masaicplot to visualize the relationship. Also, I used chi-square to double check.
+
+Between predictors, I used chi-square to check the correlation between predictors.
+
+According to the chi-squares and their p-values, I didn't remove any predictor.
+
+
+#### Why I am dealing in this way
+
+Between predictors and response, judging from the masaicplot, there are some relationship between these predictors and "classe" variable.  We can find that the chi-squares between some variables are not very huge however their p-values are great, while some have great chi-squares with small p-value.
+
+Between predictors, because I need to get a general idea about the correlation among predictors. And these predictors are categorical. So, I choose chi-square test.
+
+### Creating Dummy Variables (Training1)
+
+```{r}
+training1_num$classe = NULL
+training1_Aft = cbind(training1_num,training1_cat)
+
+dummies1 = dummyVars(classe ~ ., data = training1_Aft)
+training1_dummy = data.frame(predict(dummies1, newdata = training1_Aft))
+training1_dummy$classe = training1$classe
+```
+
+### PCA & Bootstrap & Cross-Validation
+
+#### How to deal (training1)
+
+I repeated 10-fold cross-validation for three times to find the best PCA for training1 dataset.
+
+#### Why I am dealing in this way (training1)
+
+Because there are only above plenty of observations in training1 dataset. After taking the complexity of computing and the accuracy, I choose 10-fold cross-validation.
+
+```{r}
+ctrl_PCA_1 <- trainControl(method = "repeatedcv", 
+                           number = 10,
+                           repeats = 3,
+                           classProbs = TRUE,
+                           preProcOptions = list(thresh = 0.85)
+                     )
+```
+
+#### How to deal (training2)
+
+I used bootstrap to find the best PCA for training2 dataset. The bootstrap was repeated 25 times.
+
+#### Why I am dealing in this way (training2)
+
+Because there are only above 200 observations in training2 dataset. I'm using bootstrap to maximize of the data I have.
+
+```{r}
+ctrl_PCA_2 <- trainControl(method = "boot", 
+                     classProbs = TRUE,
+                     preProcOptions = list(thresh = 0.85)
+                     )
+```
+
+## Spliting validation dataset
+
+### Spliting validation dataset for training1
+```{r}
+set.seed(1)
+trainIndex1 <- createDataPartition(training1_dummy$classe, p = .75, 
+                                  list = FALSE, 
+                                  times = 1)
+Training1_Split <- training1_dummy[ trainIndex1,]
+Validation1_Split  <- training1_dummy[-trainIndex1,]
+```
+
+```{r}
+Training1_Split_linear = data.frame(Training1_Split)
+Training1_Split_linear$classe = NULL
+descrCor1_Split = cor(Training1_Split_linear)
+summary(descrCor1_Split[upper.tri(descrCor1_Split)])
+highlyCorDescr1_Split = findCorrelation(descrCor1_Split, cutoff = .75)
+Training1_Split_linear = Training1_Split_linear[,-highlyCorDescr1_Split]
+descrCor1_Split_Aft = cor(Training1_Split_linear)
+summary(descrCor1_Split_Aft[upper.tri(descrCor1_Split_Aft)])
+
+comboInfo1_Split = findLinearCombos(Training1_Split_linear)
+Training1_Split_linear = Training1_Split_linear[,-comboInfo1_Split$remove]
+
+Training1_Split_linear$classe = Training1_Split$classe
+```
+
+#### How to deal
+
+I splitted the training1 dataset into Training1_Split and Validation1_Split with the rate between them being 0.75 : 0.25, considering the response variable. The correlation and colinearity are checked again.
+
+#### Why I am dealing in this way
+
+I'm splitting the dataset to set a measure for model selection. I'm splitting in this proportion because the data set is not too small.
+
+### Spliting validation dataset for training2
+```{r}
+training2_dummy$classe = training2$classe
+set.seed(1)
+trainIndex2 <- createDataPartition(training2_dummy$classe, p = .85, 
+                                  list = FALSE, 
+                                  times = 1)
+Training2_Split <- training2_dummy[ trainIndex2,]
+Validation2_Split  <- training2_dummy[-trainIndex2,]
+```
+
+```{r}
+Training2_Split_linear = data.frame(Training2_Split)
+Training2_Split_linear$classe = NULL
+descrCor2_Split = cor(Training2_Split_linear)
+summary(descrCor2_Split[upper.tri(descrCor2_Split)])
+highlyCorDescr2_Split = findCorrelation(descrCor2_Split, cutoff = .75)
+Training2_Split_linear = Training2_Split_linear[,-highlyCorDescr2_Split]
+descrCor2_Split_Aft = cor(Training2_Split_linear)
+summary(descrCor2_Split_Aft[upper.tri(descrCor2_Split_Aft)])
+
+comboInfo2_Split = findLinearCombos(Training2_Split_linear)
+comboInfo2_Split$remove
+
+Training2_Split_linear$classe = Training2_Split$classe
+```
+
+#### How to deal
+
+I splitted the training1 dataset into Training1_Split and Validation1_Split with the rate between them being 0.85 : 0.15, considering the response variable. Becasue the size of this data set is small, in case there will be collinearity preventing fitting models, I check the linearity again.
+
+#### Why I am dealing in this way
+
+I'm splitting the dataset to set a measure for model selection. I'm splitting in this proportion because the data set is very small. I need as much data as possible to train the model.
+
+## Model Fitting
+
+#### How to deal
+
+I choose three different models: RandomForest, Linear Discriminant Analysis Model, Penalized Multinomial Regression. And I fitted these three models to training1 and training2 respectively.
+Then, I stacked them together in the attempt to get a better result. Finally, I compared the validation results for training1 and training2 individually and choosed one to test.
+
+#### Why I am dealing in this way
+First of all, the response variable is categorical.
+What's more, my goal is to predict and these three classification models are consider to perform good in accuracy of prediction.
+
+### Model Fitting for training1
+
+#### RandomForest Model (training1)
+```{r Train1ModelRF}
+ModelFit_rf_1 = train(classe~., Training1_Split_linear, 
+                     method = "rf", 
+                     trControl = ctrl_PCA_1)
+
+Pred_rf_1 = predict(ModelFit_rf_1, newdata = Validation1_Split)
+
+CM_rf_1 = confusionMatrix(data = Pred_rf_1, reference = Validation1_Split$classe)
+```
+
+
+#### Linear Discriminant Analysis Model (training1)
+```{r Train1ModelLDA}
+
+ModelFit_lda_1 = train(classe~., Training1_Split_linear, 
+                     method = "lda", 
+                     trControl = ctrl_PCA_1)
+
+Pred_lda_1 = predict(ModelFit_lda_1, newdata = Validation1_Split)
+
+CM_lda_1 = confusionMatrix(data = Pred_lda_1, reference = Validation1_Split$classe)
+```
+
+#### Penalized Multinomial Regression (training1)
+```{r Train1ModelMultinom}
+
+ModelFit_multinom_1 = train(classe~., Training1_Split_linear, 
+                     method = "multinom", 
+                     trControl = ctrl_PCA_1)
+
+Pred_multinom_1 = predict(ModelFit_multinom_1, newdata = Validation1_Split)
+
+CM_multinom_1 = confusionMatrix(data = Pred_multinom_1, reference = Validation1_Split$classe)
+```
+
+#### Stacking RF,LDA, PMR (training1)
+```{r Train1ModelStacking}
+
+Training1_Stack = data.frame(Pred_rf_1,Pred_lda_1,Pred_multinom_1,
+                             classe = Validation1_Split$classe)
+
+ModelFit_Stack_1 = train(classe~.,
+                         method = "gam", 
+                         data = Training1_Stack)
+Pred_Stack_1 = predict(ModelFit_Stack_1,Training1_Stack)
+
+CM_Stack_1 = confusionMatrix(data = Pred_Stack_1, 
+                             reference = Validation1_Split$classe)
+```
+
+### Model Fitting for training2
+
+#### RandomForest Model (training2)
+```{r Train2ModelRF}
+ModelFit_rf_2 = train(classe~., Training2_Split_linear, 
+                     method = "rf", 
+                     trControl = ctrl_PCA_2)
+
+Pred_rf_2 = predict(ModelFit_rf_2, newdata = Validation2_Split)
+
+CM_rf_2 = confusionMatrix(data = Pred_rf_2, reference = Validation2_Split$classe)
+```
+
+#### Linear Discriminant Analysis Model (training2)
+```{r Train2ModelLDA}
+
+ModelFit_lda_2 = train(classe~., Training2_Split_linear, 
+                     method = "lda", 
+                     trControl = ctrl_PCA_2)
+
+Pred_lda_2 = predict(ModelFit_lda_2, newdata = Validation2_Split)
+
+CM_lda_2 = confusionMatrix(data = Pred_lda_2, reference = Validation2_Split$classe)
+```
+
+#### Penalized Multinomial Regression (training2)
+```{r Train2ModelMultinom}
+
+ModelFit_multinom_2 = train(classe~., Training2_Split_linear, 
+                     method = "multinom", 
+                     trControl = ctrl_PCA_2)
+
+Pred_multinom_2 = predict(ModelFit_multinom_2, newdata = Validation2_Split)
+
+CM_multinom_2 = confusionMatrix(data = Pred_multinom_2, reference = Validation2_Split$classe)
+```
+
+#### Stacking RF,LDA, PMR (training2)
+```{r Train2ModelStacking}
+
+Training2_Stack = data.frame(Pred_rf_2,Pred_lda_2,Pred_multinom_2,
+                             classe = Validation2_Split$classe)
+
+ModelFit_Stack_2 = train(classe~.,
+                         method = "gam", 
+                         data = Training2_Stack)
+Pred_Stack_2 = predict(ModelFit_Stack_2,Training2_Stack)
+
+CM_Stack_2 = confusionMatrix(data = Pred_Stack_2, 
+                             reference = Validation2_Split$classe)
+```
+
+### Model Selection
+```{r}
+result_MF = rbind(CM_rf_1$overall[c(1,6)],
+                  CM_lda_1$overall[c(1,6)],
+                  CM_multinom_1$overall[c(1,6)],
+                  CM_Stack_1$overall[c(1,6)],
+                  CM_rf_2$overall[c(1,6)],
+                  CM_lda_2$overall[c(1,6)],
+                  CM_multinom_2$overall[c(1,6)],
+                  CM_Stack_2$overall[c(1,6)])
+result_MF = cbind(c("1RF","1LDA","1Multinom","1Stack",
+                    "2RF","2LDA","2Multinom","2Stack"),
+                  result_MF)
+result_MF
+```
+
+#### How to deal
+
+I choose RandomForest model trained by training1 dataset.
+
+#### Why I am dealing in this way
+
+As we can see from this summary, for training1, RandomForest Model got a really impressive accuracy and for training2, Linear Discriminant Analysis Model got a good result. What's more, the p-value of these results are really small.
+
+So, I wanted to stack these two models together using Validation1 dataset and see which is the best in the three. But I need to check whether I can use the existing validation datasets.
+
+```{r}
+all(ModelFit_lda_2$coefnames%in%colnames(Validation1_Split))
+all(ModelFit_rf_1$coefnames%in%colnames(Validation2_Split))
+```
+
+It turned out that I cannot use neither Validation1 nor Validation2. And LDA can only apply to the observations without missing values, which will results in prediction in different length or I have to use very small dataset to stack.
+
+So, I choose Random Forest model trained by training1 dataset.
+
+## Test
+
+Firstly, I need to reconstruct testing dataset.
+```{r}
+## dealing with missing values
+for(i in length(colnames(testing)):1){
+        if(all((is.na(testing[,i])))){
+                testing[,i] = NULL
+        }
+}
+
+library(mlr)
+library(dummies)
+
+training1_cat$classe = NULL
+for (i in c("user_name","cvtd_timestamp")){
+      testing = cbind(testing, createDummyFeatures(testing, cols = i))
+      testing[,i] = NULL
+}
+
+testing = cbind(testing, dummy(testing$new_window,sep = "."))
+testing$new_window.no = testing$testing.no
+adding = colnames(training1_dummy)[!colnames(training1_dummy)%in%colnames(testing)]
+adding = adding[adding != "classe"]
+adding_df = data.frame(matrix(0, nrow=nrow(testing), ncol=length(adding)))
+colnames(adding_df) = adding
+testing = cbind(testing,adding_df)
+
+```
+### How to deal
+
+(1) Missing Values:
+
+Because there are a lot of NA values in the testing data set and some columns only contain NA. I removed these columns.
+
+(2) Categorical Variables: 
+
+Because there are several categorical variables which will be useful in the prediction. I transformed them into dummy variables.
+
+### Why I am dealing in this way
+
+(1) Missing Values:
+
+I am doing this to lessen the computing complexity and enhance the efficiency.
+
+(2) Categorical Variables:
+
+The model I chose is bulit on the base of a cleaned data set. So, if I want to use it to predict, I also need to clean the data.
+
+### Test Prediction Result
+```{r}
+Pre_test = predict(ModelFit_rf_1, testing)
+
+Pre_test
+
+```
+ 
+### Expectation to Prediction Result
+
+```{r}
+min=c()
+Q1=c()
+med=c()
+mean=c()
+Q3=c()
+max=c()
+
+Training1_Split_linear_t = data.frame(Training1_Split_linear)
+testing_t = data.frame(testing)
+Training1_Split_linear_t$new_window.no=NULL
+Training1_Split_linear_t$new_window = NULL
+Training1_Split_linear_t$classe = NULL
+testing_t$new_window.no=NULL
+testing_t$new_window = NULL
+
+for (n in colnames(Training1_Split_linear_t)){
+        Train = summary(Training1_Split_linear_t[,n])
+        Test = summary(testing_t[,n])
+        min = (Train[1] <= Test[1])
+        max = (Train[6] >= Test[6])
+        print(all(min,max))
+}
+
+sum(testing$new_window.no)<=sum(Training1_Split_linear$new_window.no)
+
+```
+
